@@ -1,0 +1,29 @@
+# Data files - contains sensitive customer information
+*.csv
+*.xlsx
+*.xls
+
+# Exclude example/test data files if needed
+# Uncomment to track specific test files:
+# !test-data/
+# !example-*.xlsx
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp

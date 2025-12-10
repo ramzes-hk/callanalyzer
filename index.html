@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Call Analyzer - Moving Company Sales Analytics</title>
+  
+  <!-- CDN Libraries -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+    
+    .stats-card {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    
+    .file-drop {
+      border: 2px dashed #cbd5e0;
+      transition: all 0.3s;
+    }
+    
+    .file-drop:hover {
+      border-color: #667eea;
+      background-color: #f7fafc;
+    }
+    
+    .file-drop.active {
+      border-color: #48bb78;
+      background-color: #f0fff4;
+    }
+    
+    .bar-chart-bar {
+      transition: width 0.5s ease-in-out;
+    }
+    
+    @media print {
+      .no-print {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body class="bg-gray-50">
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ==================== UTILITY FUNCTIONS ====================
+    
+    /**
+     * Normalize phone numbers to (xxx) xxx-xxxx format
+     */
+    function normalizePhone(phone) {
+      if (!phone) return null;
+      
+      // Convert to string and remove all non-digits
+      let digits = String(phone).replace(/[^\d]/g, '');
+      
+      // Skip extensions (3 digits or less)
+      if (digits.length <= 3) return null;
+      
+      // Handle 11-digit numbers starting with 1
+      if (digits.length === 11 && digits[0] === '1') {
+        digits = digits.slice(1);
+      }
+      
+      // Handle 10-digit North American numbers
+      if (digits.length === 10) {
+        return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`;
+      }
+      
+      // If already in correct format, return as-is
+      if (/^\(\d{3}\) \d{3}-\d{4}$/.test(phone)) {
+        return phone;
+      }
+      
+      return null; // Invalid format
+    }
+
+    /**
+     * Parse RingCentral date and time into JavaScript Date
+     */
+    function parseRingCentralDateTime(dateStr, timeStr) {
+      if (!dateStr || !timeStr) return null;
+      
+      try {
+        // Format: "Thu 11/27/2025" + "3:23 PM"
+        const combined = `${dateStr} ${timeStr}`;
+        const date = new Date(combined);
+        
+        if (isNaN(date.getTime())) {
+          console.warn('Invalid date:', combined);
+          return null;
+        }
+        
+        return date;
+      } catch (e) {
+        console.error('Error parsing date:', e);
+        return null;
+      }
+    }
+
+    /**
+     * Parse various date formats from Excel files
+     */
+    function parseExcelDate(value) {
+      if (!value) return null;
+      
+      try {
+        // If it's already a Date object
+        if (value instanceof Date) return value;
+        
+        // If it's an Excel serial number
+        if (typeof value === 'number') {
+          // Excel date serial to JS Date
+          const date = new Date((value - 25569) * 86400 * 1000);
+          return date;
+        }
+        
+        // If it's a string, try to parse it
+        if (typeof value === 'string') {
+          const date = new Date(value);
+          if (!isNaN(date.getTime())) return date;
+        }
+        
+        return null;
+      } catch (e) {
+        console.error('Error parsing Excel date:', e);
+        return null;
+      }
+    }
+
+    /**
+     * Check if a timestamp is within working hours
+     */
+    function isWithinWorkingHours(timestamp, workingHours) {
+      if (!timestamp || !workingHours) return true; // Default to include if no filter
+      
+      const date = new Date(timestamp);
+      const day = date.getDay(); // 0=Sunday, 6=Saturday
+      const hours = date.getHours();
+      const minutes = date.getMinutes();
+      const timeInMinutes = hours * 60 + minutes;
+      
+      // Check if day is enabled
+      if (!workingHours.enabledDays[day]) return false;
+      
+      // Convert working hours to minutes
+      const [startHour, startMin] = workingHours.start.split(':').map(Number);
+      const [endHour, endMin] = workingHours.end.split(':').map(Number);
+      const startMinutes = startHour * 60 + startMin;
+      const endMinutes = endHour * 60 + endMin;
+      
+      return timeInMinutes >= startMinutes && timeInMinutes <= endMinutes;
+    }
+
+    /**
+     * Calculate time difference in minutes
+     */
+    function getMinutesDifference(date1, date2) {
+      const diff = Math.abs(date2 - date1);
+      return Math.round(diff / 60000); // Convert ms to minutes
+    }
+
+    /**
+     * Format minutes to readable string
+     */
+    function formatMinutes(minutes) {
+      if (minutes < 60) return `${minutes} min`;
+      const hours = Math.floor(minutes / 60);
+      const mins = minutes % 60;
+      return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    }
+
+    /**
+     * Calculate percentile from sorted array
+     */
+    function calculatePercentile(arr, percentile) {
+      if (!arr || arr.length === 0) return 0;
+      const sorted = [...arr].sort((a, b) => a - b);
+      const index = Math.ceil((percentile / 100) * sorted.length) - 1;
+      return sorted[Math.max(0, index)];
+    }
+
+    /**
+     * Parse CSV content
+     */
+    function parseCSV(content) {
+      const lines = content.split('\n');
+      if (lines.length === 0) return [];
+      
+      // Parse header
+      const headers = parseCSVLine(lines[0]);
+      
+      // Parse rows
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        
+        const values = parseCSVLine(lines[i]);
+        const row = {};
+        headers.forEach((header, index) => {
+          row[header] = values[index] || '';
+        });
+        rows.push(row);
+      }
+      
+      return rows;
+    }
+
+    /**
+     * Parse a single CSV line handling quoted values
+     */
+    function parseCSVLine(line) {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      
+      result.push(current.trim());
+      return result;
+    }
+
+    /**
+     * Generate CSV content from array of objects
+     */
+    function generateCSV(data, columns) {
+      if (!data || data.length === 0) return '';
+      
+      // Create header
+      const header = columns.join(',');
+      
+      // Create rows
+      const rows = data.map(row => {
+        return columns.map(col => {
+          const value = row[col] || '';
+          // Escape quotes and wrap in quotes if contains comma
+          if (String(value).includes(',') || String(value).includes('"')) {
+            return `"${String(value).replace(/"/g, '""')}"`;
+          }
+          return value;
+        }).join(',');
+      });
+      
+      return [header, ...rows].join('\n');
+    }
+
+    /**
+     * Download a file
+     */
+    function downloadFile(content, filename, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    // ==================== VALIDATION FUNCTIONS ====================
+
+    /**
+     * Validate file before parsing (Phase 1)
+     * Checks file size and extension
+     */
+    function validateFilePreParse(file, expectedExtensions, maxSizeMB = 10) {
+      const errors = [];
+      const maxBytes = maxSizeMB * 1024 * 1024;
+      
+      // Check file size
+      if (file.size > maxBytes) {
+        errors.push(`File size (${(file.size / 1024 / 1024).toFixed(2)}MB) exceeds ${maxSizeMB}MB limit`);
+      }
+      
+      // Check extension
+      const fileName = file.name.toLowerCase();
+      const hasValidExtension = expectedExtensions.some(ext => 
+        fileName.endsWith(ext.toLowerCase().trim())
+      );
+      
+      if (!hasValidExtension) {
+        errors.push(`Invalid file extension. Expected: ${expectedExtensions.join(', ')}`);
+      }
+      
+      return errors;
+    }
+
+    /**
+     * Validate file structure after parsing (Phase 2)
+     * Checks for required columns and non-empty data
+     */
+    function validateFileStructure(data, requiredColumns, fileName) {
+      const errors = [];
+      
+      // Check if file is empty
+      if (!data || data.length === 0) {
+        errors.push(`${fileName}: File is empty or has no data rows`);
+        return errors;
+      }
+      
+      // Check required columns exist
+      const firstRow = data[0];
+      const actualColumns = Object.keys(firstRow);
+      
+      requiredColumns.forEach(col => {
+        if (!actualColumns.includes(col)) {
+          errors.push(`${fileName}: Missing required column "${col}"`);
+        }
+      });
+      
+      return errors;
+    }
+
+    // ==================== MAIN APP COMPONENT ====================
+    
+    function App() {
+      const [newLeadsFile, setNewLeadsFile] = useState(null);
+      const [leadStatusFile, setLeadStatusFile] = useState(null);
+      const [callLogFile, setCallLogFile] = useState(null);
+      
+      const [workingHours, setWorkingHours] = useState(() => {
+        // Load from localStorage or use defaults
+        const saved = localStorage.getItem('workingHours');
+        return saved ? JSON.parse(saved) : {
+          start: '09:00',
+          end: '17:00',
+          enabledDays: {
+            0: false, // Sunday
+            1: true,  // Monday
+            2: true,  // Tuesday
+            3: true,  // Wednesday
+            4: true,  // Thursday
+            5: true,  // Friday
+            6: false  // Saturday
+          }
+        };
+      });
+      
+      const [processing, setProcessing] = useState(false);
+      const [results, setResults] = useState(null);
+      const [errors, setErrors] = useState([]);
+      
+      const statsRef = useRef(null);
+      
+      // Save working hours to localStorage
+      useEffect(() => {
+        localStorage.setItem('workingHours', JSON.stringify(workingHours));
+      }, [workingHours]);
+      
+      // Process files
+      const handleAnalyze = async () => {
+        if (!newLeadsFile || !leadStatusFile || !callLogFile) {
+          setErrors(['Please upload all three files']);
+          return;
+        }
+        
+        setProcessing(true);
+        setErrors([]);
+        
+        try {
+          // Parse files
+          const newLeads = await parseExcelFile(newLeadsFile);
+          const leadStatus = await parseExcelFile(leadStatusFile);
+          const callLogs = await parseCSVFile(callLogFile);
+          
+          // Phase 2 Validation: Check structure and required columns
+          const structureErrors = [
+            ...validateFileStructure(newLeads, ['Quote #', 'Received at', 'Customer Phone'], 'New Leads'),
+            ...validateFileStructure(leadStatus, ['Quote #'], 'Lead Status'),
+            ...validateFileStructure(callLogs, ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result'], 'Call Log')
+          ];
+          
+          if (structureErrors.length > 0) {
+            setErrors(structureErrors);
+            setProcessing(false);
+            return; // Block processing
+          }
+          
+          // Process data
+          const processedResults = processData(newLeads, leadStatus, callLogs, workingHours);
+          
+          setResults(processedResults);
+        } catch (error) {
+          console.error('Processing error:', error);
+          setErrors([`Error processing files: ${error.message}`]);
+        } finally {
+          setProcessing(false);
+        }
+      };
+      
+      // Parse Excel file
+      const parseExcelFile = (file) => {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          
+          reader.onload = (e) => {
+            try {
+              const data = new Uint8Array(e.target.result);
+              const workbook = XLSX.read(data, { type: 'array' });
+              const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+              const jsonData = XLSX.utils.sheet_to_json(firstSheet);
+              resolve(jsonData);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          
+          reader.onerror = () => reject(new Error('Failed to read file'));
+          reader.readAsArrayBuffer(file);
+        });
+      };
+      
+      // Parse CSV file
+      const parseCSVFile = (file) => {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          
+          reader.onload = (e) => {
+            try {
+              const content = e.target.result;
+              const data = parseCSV(content);
+              resolve(data);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          
+          reader.onerror = () => reject(new Error('Failed to read CSV file'));
+          reader.readAsText(file);
+        });
+      };
+      
+      // Main data processing function
+      const processData = (newLeads, leadStatus, callLogs, workingHours) => {
+        // Phase 3: Silent row filtering with console logging
+        
+        // Step 1: Join new leads and lead status by Quote #
+        const leadsMap = new Map();
+        let skippedLeadRows = 0;
+        let skippedStatusRows = 0;
+        
+        newLeads.forEach(lead => {
+          const quoteNum = lead['Quote #'];
+          // Phase 3: Skip rows with missing Quote #
+          if (!quoteNum || quoteNum === '') {
+            console.log('Skipping lead row with missing Quote #:', lead);
+            skippedLeadRows++;
+            return;
+          }
+          if (!leadsMap.has(quoteNum)) {
+            leadsMap.set(quoteNum, { ...lead });
+          }
+        });
+        
+        leadStatus.forEach(status => {
+          const quoteNum = status['Quote #'];
+          // Phase 3: Skip rows with missing Quote #
+          if (!quoteNum || quoteNum === '') {
+            console.log('Skipping status row with missing Quote #:', status);
+            skippedStatusRows++;
+            return;
+          }
+          if (leadsMap.has(quoteNum)) {
+            leadsMap.set(quoteNum, { ...leadsMap.get(quoteNum), ...status });
+          }
+        });
+        
+        const allLeads = Array.from(leadsMap.values());
+        
+        // Log summary of Phase 3 filtering for Step 1
+        if (skippedLeadRows > 0) {
+          console.log(`Phase 3: Skipped ${skippedLeadRows} lead row(s) with missing Quote #`);
+        }
+        if (skippedStatusRows > 0) {
+          console.log(`Phase 3: Skipped ${skippedStatusRows} status row(s) with missing Quote #`);
+        }
+        
+        // Step 2: Filter leads by working hours
+        let skippedInvalidDates = 0;
+        const businessHoursLeads = allLeads.filter(lead => {
+          const receivedAt = parseExcelDate(lead['Received at']);
+          // Phase 3: Skip leads with unparseable dates
+          if (!receivedAt) {
+            console.log('Skipping lead with invalid Received at date:', lead['Quote #'], lead['Received at']);
+            skippedInvalidDates++;
+            return false;
+          }
+          return isWithinWorkingHours(receivedAt, workingHours);
+        });
+        
+        // Log summary of Phase 3 filtering for Step 2
+        if (skippedInvalidDates > 0) {
+          console.log(`Phase 3: Skipped ${skippedInvalidDates} lead(s) with invalid Received at date`);
+        }
+        
+        // Step 3: Process call logs - filter Type=Voice and successful calls
+        let skippedCallRows = 0;
+        const validCalls = callLogs.filter(call => {
+          // Filter Type (existing logic, silent)
+          if (call.Type !== 'Voice') {
+            return false;
+          }
+          
+          // Filter Action Result (existing logic, silent)
+          if (call['Action Result'] !== 'Call connected' && call['Action Result'] !== 'Accepted') {
+            return false;
+          }
+          
+          return true;
+        }).map(call => {
+          const callTime = parseRingCentralDateTime(call.Date, call.Time);
+          const fromPhone = normalizePhone(call.From);
+          const toPhone = normalizePhone(call.To);
+          
+          return {
+            ...call,
+            callTime,
+            fromPhone,
+            toPhone,
+            direction: call.Direction
+          };
+        }).filter(call => {
+          // Phase 3: Skip calls with invalid date/time
+          if (!call.callTime) {
+            console.log('Skipping call with invalid date/time:', call.Date, call.Time);
+            skippedCallRows++;
+            return false;
+          }
+          
+          // Phase 3: Skip calls with no valid phone numbers
+          if (!call.fromPhone && !call.toPhone) {
+            console.log('Skipping call with no valid phone numbers:', call);
+            skippedCallRows++;
+            return false;
+          }
+          
+          return true;
+        });
+        
+        // Log summary of Phase 3 filtering for Step 3
+        if (skippedCallRows > 0) {
+          console.log(`Phase 3: Skipped ${skippedCallRows} call record(s) with invalid date/time or phone numbers`);
+        }
+        
+        // Step 4: Match calls to leads
+        const salesTeamCalled = [];
+        const customerCalled = [];
+        const neverContacted = [];
+        
+        businessHoursLeads.forEach(lead => {
+          const leadPhone = normalizePhone(lead['Customer Phone']);
+          const receivedAt = parseExcelDate(lead['Received at']);
+          
+          if (!leadPhone) {
+            neverContacted.push(lead);
+            return;
+          }
+          
+          // Find all calls matching this phone number after received time
+          const matchingCalls = validCalls.filter(call => {
+            if (!call.callTime || call.callTime < receivedAt) return false;
+            
+            return (call.fromPhone === leadPhone || call.toPhone === leadPhone);
+          }).sort((a, b) => a.callTime - b.callTime);
+          
+          if (matchingCalls.length === 0) {
+            neverContacted.push(lead);
+            return;
+          }
+          
+          // Get first call
+          const firstCall = matchingCalls[0];
+          const responseTime = getMinutesDifference(receivedAt, firstCall.callTime);
+          
+          if (firstCall.direction === 'Outgoing') {
+            salesTeamCalled.push({
+              ...lead,
+              'Contacted at': firstCall.callTime,
+              'Response Time': responseTime
+            });
+          } else {
+            customerCalled.push({
+              ...lead,
+              'Call received at': firstCall.callTime
+            });
+          }
+        });
+        
+        // Step 5: Calculate statistics
+        const stats = calculateStatistics(businessHoursLeads, salesTeamCalled, customerCalled, neverContacted);
+        
+        return {
+          stats,
+          salesTeamCalled,
+          customerCalled,
+          neverContacted,
+          totalLeads: businessHoursLeads.length
+        };
+      };
+      
+      // Calculate statistics
+      const calculateStatistics = (allLeads, salesTeam, customer, never) => {
+        const total = allLeads.length;
+        
+        // Response times (only for sales team called)
+        const responseTimes = salesTeam.map(l => l['Response Time']).filter(t => t !== undefined);
+        
+        const median = responseTimes.length > 0 
+          ? calculatePercentile(responseTimes, 50)
+          : 0;
+        
+        const average = responseTimes.length > 0
+          ? Math.round(responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length)
+          : 0;
+        
+        const percentile80 = responseTimes.length > 0
+          ? calculatePercentile(responseTimes, 80)
+          : 0;
+        
+        // Response time buckets
+        const buckets = {
+          'under5': responseTimes.filter(t => t < 5).length,
+          '5to15': responseTimes.filter(t => t >= 5 && t < 15).length,
+          '15to30': responseTimes.filter(t => t >= 15 && t < 30).length,
+          '30to60': responseTimes.filter(t => t >= 30 && t < 60).length,
+          'over60': responseTimes.filter(t => t >= 60).length
+        };
+        
+        return {
+          total,
+          salesTeamCount: salesTeam.length,
+          salesTeamPercent: total > 0 ? Math.round((salesTeam.length / total) * 100) : 0,
+          customerCount: customer.length,
+          customerPercent: total > 0 ? Math.round((customer.length / total) * 100) : 0,
+          neverContactedCount: never.length,
+          neverContactedPercent: total > 0 ? Math.round((never.length / total) * 100) : 0,
+          responseTime: {
+            median,
+            average,
+            percentile80
+          },
+          buckets
+        };
+      };
+      
+      // Export CSV
+      const exportCSV = (type) => {
+        if (!results) return;
+        
+        let data, columns, filename;
+        
+        switch(type) {
+          case 'sales':
+            data = results.salesTeamCalled;
+            columns = ['Quote #', 'Branch Name', 'Customer Name', 'Customer Phone', 
+                      'Received at', 'Contacted at', 'Response Time', 'Quote Sent', 
+                      'Sales Person', 'Referral Source'];
+            filename = `sales-team-contact-${new Date().toISOString().split('T')[0]}.csv`;
+            break;
+          
+          case 'customer':
+            data = results.customerCalled;
+            columns = ['Quote #', 'Branch Name', 'Customer Name', 'Customer Phone',
+                      'Received at', 'Call received at', 'Quote Sent', 'Sales Person', 
+                      'Referral Source'];
+            filename = `customer-contact-${new Date().toISOString().split('T')[0]}.csv`;
+            break;
+          
+          case 'never':
+            data = results.neverContacted;
+            columns = ['Quote #', 'Branch Name', 'Customer Name', 'Customer Phone',
+                      'Received at', 'Quote Sent', 'Sales Person'];
+            filename = `never-contacted-${new Date().toISOString().split('T')[0]}.csv`;
+            break;
+          
+          default:
+            return;
+        }
+        
+        // Format dates in the data
+        const formattedData = data.map(row => {
+          const newRow = { ...row };
+          
+          // Format date fields
+          if (newRow['Received at'] instanceof Date) {
+            newRow['Received at'] = newRow['Received at'].toLocaleString();
+          }
+          if (newRow['Contacted at'] instanceof Date) {
+            newRow['Contacted at'] = newRow['Contacted at'].toLocaleString();
+          }
+          if (newRow['Call received at'] instanceof Date) {
+            newRow['Call received at'] = newRow['Call received at'].toLocaleString();
+          }
+          if (newRow['Quote Sent'] instanceof Date) {
+            newRow['Quote Sent'] = newRow['Quote Sent'].toLocaleString();
+          }
+          
+          // Format response time
+          if (newRow['Response Time'] !== undefined) {
+            newRow['Response Time'] = `${newRow['Response Time']} minutes`;
+          }
+          
+          return newRow;
+        });
+        
+        const csv = generateCSV(formattedData, columns);
+        downloadFile(csv, filename, 'text/csv');
+      };
+      
+      // Export PNG
+      const exportPNG = async () => {
+        if (!statsRef.current) return;
+        
+        try {
+          const canvas = await html2canvas(statsRef.current, {
+            backgroundColor: '#ffffff',
+            scale: 2
+          });
+          
+          canvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `call-analysis-${new Date().toISOString().split('T')[0]}.png`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+          });
+        } catch (error) {
+          console.error('Error generating PNG:', error);
+          setErrors(['Error generating PNG image']);
+        }
+      };
+      
+      const reset = () => {
+        setNewLeadsFile(null);
+        setLeadStatusFile(null);
+        setCallLogFile(null);
+        setResults(null);
+        setErrors([]);
+      };
+      
+      return (
+        <div className="min-h-screen p-8">
+          <div className="max-w-6xl mx-auto">
+            {/* Header */}
+            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+              <h1 className="text-3xl font-bold text-gray-800 mb-2">
+                Call Response Analyzer
+              </h1>
+              <p className="text-gray-600">
+                Analyze sales team response times for moving company leads
+              </p>
+            </div>
+            
+            {/* Errors */}
+            {errors.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+                <h3 className="text-red-800 font-semibold mb-2">
+                  Validation Errors - Please fix these issues before analyzing:
+                </h3>
+                <ul className="list-disc list-inside text-red-700 space-y-1">
+                  {errors.map((err, idx) => <li key={idx}>{err}</li>)}
+                </ul>
+              </div>
+            )}
+            
+            {!results ? (
+              <>
+                {/* Working Hours Config */}
+                <WorkingHoursConfig 
+                  workingHours={workingHours}
+                  setWorkingHours={setWorkingHours}
+                />
+                
+                {/* File Upload Section */}
+                <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Upload Files</h2>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <FileUploader
+                      label="New Leads (Excel)"
+                      accept=".xlsx,.xls"
+                      file={newLeadsFile}
+                      setFile={setNewLeadsFile}
+                    />
+                    
+                    <FileUploader
+                      label="Lead Status (Excel)"
+                      accept=".xlsx,.xls"
+                      file={leadStatusFile}
+                      setFile={setLeadStatusFile}
+                    />
+                    
+                    <FileUploader
+                      label="RingCentral Calls (CSV)"
+                      accept=".csv"
+                      file={callLogFile}
+                      setFile={setCallLogFile}
+                    />
+                  </div>
+                  
+                  <div className="mt-6 flex justify-center">
+                    <button
+                      onClick={handleAnalyze}
+                      disabled={!newLeadsFile || !leadStatusFile || !callLogFile || processing}
+                      className="px-8 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition"
+                    >
+                      {processing ? 'Processing...' : 'Analyze Data'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Results Section */}
+                <ResultsDisplay 
+                  results={results}
+                  statsRef={statsRef}
+                />
+                
+                {/* Export Buttons */}
+                <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Export Data</h2>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <button
+                      onClick={exportPNG}
+                      className="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition"
+                    >
+                      Download Statistics (PNG)
+                    </button>
+                    
+                    <button
+                      onClick={() => exportCSV('sales')}
+                      className="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition"
+                    >
+                      Download Sales Team Contact (CSV)
+                    </button>
+                    
+                    <button
+                      onClick={() => exportCSV('customer')}
+                      className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
+                    >
+                      Download Customer Contact (CSV)
+                    </button>
+                    
+                    <button
+                      onClick={() => exportCSV('never')}
+                      className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition"
+                    >
+                      Download Never Contacted (CSV)
+                    </button>
+                  </div>
+                  
+                  <div className="mt-4 flex justify-center">
+                    <button
+                      onClick={reset}
+                      className="px-6 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
+                    >
+                      Analyze New Data
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+    
+    // ==================== COMPONENTS ====================
+    
+    function FileUploader({ label, accept, file, setFile }) {
+      const [error, setError] = useState(null);
+      
+      const handleFileChange = (e) => {
+        const selectedFile = e.target.files[0];
+        if (selectedFile) {
+          // Phase 1 Validation: File size and extension
+          const expectedExtensions = accept.split(',').map(ext => ext.trim());
+          const validationErrors = validateFilePreParse(selectedFile, expectedExtensions, 10);
+          
+          if (validationErrors.length > 0) {
+            setError(validationErrors[0]); // Show first error
+            setFile(null);
+          } else {
+            setError(null);
+            setFile(selectedFile);
+          }
+        }
+      };
+      
+      return (
+        <div className={`file-drop rounded-lg p-6 text-center ${error ? 'border-red-500 bg-red-50' : ''}`}>
+          <label className="block">
+            <div className="mb-2 font-semibold text-gray-700">{label}</div>
+            <input
+              type="file"
+              accept={accept}
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            {file ? (
+              <div className="text-green-600 font-medium">
+                ✓ {file.name}
+                <div className="text-xs text-gray-500 mt-1">
+                  {(file.size / 1024 / 1024).toFixed(2)} MB
+                </div>
+              </div>
+            ) : error ? (
+              <div className="text-red-600 text-sm">
+                ✗ {error}
+                <div className="text-gray-500 cursor-pointer hover:text-blue-600 mt-2">
+                  Click to try again
+                </div>
+              </div>
+            ) : (
+              <div className="text-gray-500 cursor-pointer hover:text-blue-600">
+                Click to upload
+              </div>
+            )}
+          </label>
+        </div>
+      );
+    }
+    
+    function WorkingHoursConfig({ workingHours, setWorkingHours }) {
+      const [expanded, setExpanded] = useState(false);
+      
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      
+      const toggleDay = (dayIndex) => {
+        setWorkingHours({
+          ...workingHours,
+          enabledDays: {
+            ...workingHours.enabledDays,
+            [dayIndex]: !workingHours.enabledDays[dayIndex]
+          }
+        });
+      };
+      
+      return (
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <div 
+            className="flex justify-between items-center cursor-pointer"
+            onClick={() => setExpanded(!expanded)}
+          >
+            <h2 className="text-xl font-semibold text-gray-800">Working Hours</h2>
+            <span className="text-gray-500">{expanded ? '▼' : '▶'}</span>
+          </div>
+          
+          {expanded && (
+            <div className="mt-4 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Start Time
+                  </label>
+                  <input
+                    type="time"
+                    value={workingHours.start}
+                    onChange={(e) => setWorkingHours({ ...workingHours, start: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    End Time
+                  </label>
+                  <input
+                    type="time"
+                    value={workingHours.end}
+                    onChange={(e) => setWorkingHours({ ...workingHours, end: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  />
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Working Days
+                </label>
+                <div className="flex gap-2">
+                  {days.map((day, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => toggleDay(idx)}
+                      className={`px-3 py-2 rounded-md font-medium transition ${
+                        workingHours.enabledDays[idx]
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-200 text-gray-600'
+                      }`}
+                    >
+                      {day}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+    
+    function ResultsDisplay({ results, statsRef }) {
+      const { stats } = results;
+      
+      return (
+        <>
+          {/* Statistics Display (for PNG export) */}
+          <div ref={statsRef} className="bg-white rounded-lg shadow-md p-8 mb-6">
+            {/* Header */}
+            <div className="text-center mb-8">
+              <div className="inline-block border-2 border-gray-300 px-8 py-3 mb-3">
+                <span className="text-xl font-bold text-gray-600">COMPANY LOGO</span>
+              </div>
+              <h2 className="text-2xl font-bold text-gray-800">Call Response Analysis</h2>
+              <p className="text-gray-600">Generated on {new Date().toLocaleDateString()}</p>
+            </div>
+            
+            {/* Summary Cards */}
+            <div className="mb-8">
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">Summary</h3>
+              <div className="grid grid-cols-4 gap-4">
+                <StatCard 
+                  title="Total Leads"
+                  value={stats.total}
+                  color="bg-blue-500"
+                />
+                <StatCard 
+                  title="Sales Called"
+                  value={stats.salesTeamCount}
+                  subtitle={`${stats.salesTeamPercent}%`}
+                  color="bg-green-500"
+                />
+                <StatCard 
+                  title="Customer Called"
+                  value={stats.customerCount}
+                  subtitle={`${stats.customerPercent}%`}
+                  color="bg-yellow-500"
+                />
+                <StatCard 
+                  title="Never Contacted"
+                  value={stats.neverContactedCount}
+                  subtitle={`${stats.neverContactedPercent}%`}
+                  color="bg-red-500"
+                />
+              </div>
+            </div>
+            
+            {/* Response Time Metrics */}
+            <div className="mb-8">
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">
+                Response Time Analysis (Sales Team)
+              </h3>
+              <div className="bg-gray-50 rounded-lg p-6">
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div>
+                    <div className="text-3xl font-bold text-blue-600">
+                      {formatMinutes(stats.responseTime.median)}
+                    </div>
+                    <div className="text-sm text-gray-600 mt-1">Median</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-purple-600">
+                      {formatMinutes(stats.responseTime.average)}
+                    </div>
+                    <div className="text-sm text-gray-600 mt-1">Average</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-indigo-600">
+                      {formatMinutes(stats.responseTime.percentile80)}
+                    </div>
+                    <div className="text-sm text-gray-600 mt-1">80th Percentile</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            {/* Response Time Distribution */}
+            <div>
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">
+                Response Time Distribution
+              </h3>
+              <ResponseTimeBuckets buckets={stats.buckets} total={stats.salesTeamCount} />
+            </div>
+          </div>
+        </>
+      );
+    }
+    
+    function StatCard({ title, value, subtitle, color }) {
+      return (
+        <div className={`${color} text-white rounded-lg p-4 shadow-md`}>
+          <div className="text-sm opacity-90 mb-1">{title}</div>
+          <div className="text-3xl font-bold">{value}</div>
+          {subtitle && <div className="text-sm mt-1 opacity-90">{subtitle}</div>}
+        </div>
+      );
+    }
+    
+    function ResponseTimeBuckets({ buckets, total }) {
+      const data = [
+        { label: '< 5 min', count: buckets.under5 },
+        { label: '5-15 min', count: buckets['5to15'] },
+        { label: '15-30 min', count: buckets['15to30'] },
+        { label: '30-60 min', count: buckets['30to60'] },
+        { label: '> 60 min', count: buckets.over60 }
+      ];
+      
+      const maxCount = Math.max(...data.map(d => d.count), 1);
+      
+      return (
+        <div className="space-y-3">
+          {data.map((item, idx) => {
+            const percentage = total > 0 ? Math.round((item.count / total) * 100) : 0;
+            const barWidth = total > 0 ? (item.count / maxCount) * 100 : 0;
+            
+            return (
+              <div key={idx} className="flex items-center">
+                <div className="w-24 text-sm font-medium text-gray-700">
+                  {item.label}
+                </div>
+                <div className="flex-1 bg-gray-200 rounded-full h-8 relative overflow-hidden">
+                  <div 
+                    className="bar-chart-bar h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full flex items-center justify-end pr-3"
+                    style={{ width: `${barWidth}%` }}
+                  >
+                    {item.count > 0 && (
+                      <span className="text-white text-sm font-semibold">
+                        {item.count} ({percentage}%)
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    
+    // ==================== RENDER APP ====================
+    
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
