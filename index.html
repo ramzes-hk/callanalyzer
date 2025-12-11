@@ -285,6 +285,63 @@
     // ==================== VALIDATION FUNCTIONS ====================
 
     /**
+     * Validate email address format
+     */
+    function validateEmail(email) {
+      if (!email) return false;
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      return emailRegex.test(email);
+    }
+
+    // ==================== WEBHOOK INTEGRATION ====================
+    
+    // Webhook URL for user data collection
+    const WEBHOOK_URL = 'https://webhook.site/d5f69216-fa5c-46b7-a397-cf360640bfe2';
+
+    /**
+     * Send user data to webhook
+     * Fails silently if webhook is unavailable
+     */
+    async function sendToWebhook(userData) {
+      try {
+        const payload = {
+          user: {
+            name: userData.name,
+            email: userData.email,
+            company: userData.company,
+            position: userData.position
+          },
+          timestamp: new Date().toISOString(),
+          metadata: {
+            app: 'Call Response Analyzer',
+            version: '1.0'
+          }
+        };
+        
+        const response = await fetch(WEBHOOK_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+          mode: 'cors'
+        });
+        
+        if (response.ok) {
+          console.log('✓ User data sent to webhook successfully');
+          return true;
+        } else {
+          console.warn('⚠ Webhook returned non-OK status:', response.status);
+          return false;
+        }
+      } catch (error) {
+        console.error('✗ Failed to send data to webhook:', error.message);
+        // Silent failure - don't block user
+        return false;
+      }
+    }
+
+    /**
      * Validate file before parsing (Phase 1)
      * Checks file size and extension
      */
@@ -361,6 +418,14 @@
         };
       });
       
+      const [userInfo, setUserInfo] = useState(() => {
+        // Load user info from localStorage
+        const saved = localStorage.getItem('userInfo');
+        return saved ? JSON.parse(saved) : null;
+      });
+      
+      const [showUserInfoModal, setShowUserInfoModal] = useState(false);
+      
       const [processing, setProcessing] = useState(false);
       const [results, setResults] = useState(null);
       const [errors, setErrors] = useState([]);
@@ -376,6 +441,12 @@
       const handleAnalyze = async () => {
         if (!newLeadsFile || !leadStatusFile || !callLogFile) {
           setErrors(['Please upload all three files']);
+          return;
+        }
+        
+        // Check if user info exists, if not show modal
+        if (!userInfo) {
+          setShowUserInfoModal(true);
           return;
         }
         
@@ -411,6 +482,43 @@
         } finally {
           setProcessing(false);
         }
+      };
+      
+      // Handle user info submission
+      const handleUserInfoSubmit = async (userData) => {
+        // Save to state
+        setUserInfo(userData);
+        
+        // Save to localStorage with webhookSent flag
+        const userDataToStore = {
+          ...userData,
+          timestamp: new Date().toISOString(),
+          webhookSent: false
+        };
+        localStorage.setItem('userInfo', JSON.stringify(userDataToStore));
+        
+        // Send to webhook (only if not already sent)
+        const existingData = localStorage.getItem('userInfo');
+        const parsed = existingData ? JSON.parse(existingData) : null;
+        
+        if (!parsed || !parsed.webhookSent) {
+          console.log('Sending user data to webhook...');
+          const success = await sendToWebhook(userData);
+          
+          if (success) {
+            // Mark as sent to prevent duplicate sends
+            userDataToStore.webhookSent = true;
+            localStorage.setItem('userInfo', JSON.stringify(userDataToStore));
+          }
+        } else {
+          console.log('User data already sent to webhook, skipping...');
+        }
+        
+        // Close modal
+        setShowUserInfoModal(false);
+        
+        // Continue with analysis
+        handleAnalyze();
       };
       
       // Parse Excel file
@@ -891,6 +999,14 @@
               </>
             )}
           </div>
+          
+          {/* User Info Modal */}
+          {showUserInfoModal && (
+            <UserInfoModal 
+              onSubmit={handleUserInfoSubmit}
+              onCancel={() => setShowUserInfoModal(false)}
+            />
+          )}
         </div>
       );
     }
@@ -947,6 +1063,167 @@
               </div>
             )}
           </label>
+        </div>
+      );
+    }
+    
+    function UserInfoModal({ onSubmit, onCancel }) {
+      const [formData, setFormData] = useState({
+        name: '',
+        email: '',
+        company: '',
+        position: ''
+      });
+      
+      const [formErrors, setFormErrors] = useState({});
+      
+      const handleChange = (field, value) => {
+        setFormData({ ...formData, [field]: value });
+        // Clear error for this field when user starts typing
+        if (formErrors[field]) {
+          setFormErrors({ ...formErrors, [field]: null });
+        }
+      };
+      
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        
+        // Validate all fields
+        const errors = {};
+        
+        if (!formData.name.trim()) {
+          errors.name = 'Name is required';
+        }
+        
+        if (!formData.email.trim()) {
+          errors.email = 'Email is required';
+        } else if (!validateEmail(formData.email)) {
+          errors.email = 'Please enter a valid email address';
+        }
+        
+        if (!formData.company.trim()) {
+          errors.company = 'Company name is required';
+        }
+        
+        if (!formData.position.trim()) {
+          errors.position = 'Position is required';
+        }
+        
+        // If there are errors, show them
+        if (Object.keys(errors).length > 0) {
+          setFormErrors(errors);
+          return;
+        }
+        
+        // Submit the form
+        onSubmit(formData);
+      };
+      
+      return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
+            <h2 className="text-2xl font-bold text-gray-800 mb-2">
+              Before We Analyze...
+            </h2>
+            <p className="text-gray-600 mb-6">
+              Please provide your information to continue
+            </p>
+            
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {/* Name Field */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) => handleChange('name', e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    formErrors.name ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="John Doe"
+                />
+                {formErrors.name && (
+                  <p className="text-red-600 text-sm mt-1">{formErrors.name}</p>
+                )}
+              </div>
+              
+              {/* Email Field */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Email <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="email"
+                  value={formData.email}
+                  onChange={(e) => handleChange('email', e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    formErrors.email ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="john@example.com"
+                />
+                {formErrors.email && (
+                  <p className="text-red-600 text-sm mt-1">{formErrors.email}</p>
+                )}
+              </div>
+              
+              {/* Company Field */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Company Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.company}
+                  onChange={(e) => handleChange('company', e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    formErrors.company ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="ABC Moving Company"
+                />
+                {formErrors.company && (
+                  <p className="text-red-600 text-sm mt-1">{formErrors.company}</p>
+                )}
+              </div>
+              
+              {/* Position Field */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Position <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.position}
+                  onChange={(e) => handleChange('position', e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    formErrors.position ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                  placeholder="Sales Manager"
+                />
+                {formErrors.position && (
+                  <p className="text-red-600 text-sm mt-1">{formErrors.position}</p>
+                )}
+              </div>
+              
+              {/* Buttons */}
+              <div className="flex gap-3 mt-6">
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-semibold hover:bg-gray-300 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
+                >
+                  Continue to Analysis
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       );
     }
