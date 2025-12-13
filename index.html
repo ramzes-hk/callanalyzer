@@ -302,7 +302,7 @@
      * Send user data to webhook
      * Fails silently if webhook is unavailable
      */
-    async function sendToWebhook(userData) {
+    function sendToWebhook(userData) {
       try {
         const payload = {
           user: {
@@ -318,22 +318,16 @@
           }
         };
         
-        const response = await fetch(WEBHOOK_URL, {
+        fetch(WEBHOOK_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(payload),
-          mode: 'cors'
+          mode: 'no-cors'
         });
         
-        if (response.ok) {
-          console.log('✓ User data sent to webhook successfully');
-          return true;
-        } else {
-          console.warn('⚠ Webhook returned non-OK status:', response.status);
-          return false;
-        }
+        return true;
       } catch (error) {
         console.error('✗ Failed to send data to webhook:', error.message);
         // Silent failure - don't block user
@@ -445,7 +439,7 @@
         }
         
         // Check if user info exists, if not show modal
-        if (!userInfo) {
+        if (!userInfo && !localStorage['userInfo']) {
           setShowUserInfoModal(true);
           return;
         }
