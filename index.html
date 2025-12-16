@@ -111,6 +111,61 @@
     }
 
     /**
+     * Parse Dialpad timestamp into JavaScript Date
+     * Format: "2025-11-09 08:11:34.373606"
+     */
+    function parseDialpadDateTime(timestamp) {
+      if (!timestamp) return null;
+      
+      try {
+        // Dialpad uses ISO-like format with microseconds
+        const date = new Date(timestamp);
+        
+        if (isNaN(date.getTime())) {
+          console.warn('Invalid Dialpad timestamp:', timestamp);
+          return null;
+        }
+        
+        return date;
+      } catch (e) {
+        console.error('Error parsing Dialpad date:', e);
+        return null;
+      }
+    }
+
+    /**
+     * Parse call log row based on provider type
+     * Returns normalized call object
+     */
+    function parseCallLogRow(row, logType) {
+      if (logType === 'ringcentral') {
+        return {
+          callTime: parseRingCentralDateTime(row['Date'], row['Time']),
+          fromPhone: normalizePhone(row['From']),
+          toPhone: normalizePhone(row['To']),
+          direction: row['Direction'], // "Incoming" or "Outgoing"
+          type: row['Type'],
+          actionResult: row['Action Result'],
+          name: row['Name'],
+          originalRow: row
+        };
+      } else if (logType === 'dialpad') {
+        return {
+          callTime: parseDialpadDateTime(row['date_connected']),
+          fromPhone: normalizePhone(row['external_number']),
+          toPhone: normalizePhone(row['internal_number']),
+          direction: row['direction'] === 'inbound' ? 'Incoming' : 'Outgoing',
+          type: 'Voice', // Dialpad doesn't have type, assume Voice
+          category: row['category'],
+          name: row['name'],
+          originalRow: row
+        };
+      }
+      
+      return null;
+    }
+
+    /**
      * Parse various date formats from Excel files
      */
     function parseExcelDate(value) {
@@ -393,6 +448,7 @@
       const [newLeadsFile, setNewLeadsFile] = useState(null);
       const [leadStatusFile, setLeadStatusFile] = useState(null);
       const [callLogFile, setCallLogFile] = useState(null);
+      const [callLogType, setCallLogType] = useState(null); // 'ringcentral' | 'dialpad' | null
       
       const [workingHours, setWorkingHours] = useState(() => {
         // Load from localStorage or use defaults
@@ -432,14 +488,23 @@
       }, [workingHours]);
       
       // Process files
-      const handleAnalyze = async () => {
+      const handleAnalyze = async (providedUserData = null) => {
+        // Check if call log type is selected
+        if (!callLogType) {
+          setErrors(['Please select call log provider (RingCentral or Dialpad)']);
+          return;
+        }
+        
         if (!newLeadsFile || !leadStatusFile || !callLogFile) {
           setErrors(['Please upload all three files']);
           return;
         }
         
+        // Use provided data OR state
+        const currentUserInfo = providedUserData || userInfo;
+        
         // Check if user info exists, if not show modal
-        if (!userInfo && !localStorage['userInfo']) {
+        if (!currentUserInfo) {
           setShowUserInfoModal(true);
           return;
         }
@@ -453,11 +518,15 @@
           const leadStatus = await parseExcelFile(leadStatusFile);
           const callLogs = await parseCSVFile(callLogFile);
           
-          // Phase 2 Validation: Check structure and required columns
+          // Phase 2 Validation: Check structure and required columns (dynamic based on call log type)
+          const callLogRequiredColumns = callLogType === 'ringcentral'
+            ? ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result']
+            : ['direction', 'external_number', 'internal_number', 'date_connected', 'category'];
+          
           const structureErrors = [
             ...validateFileStructure(newLeads, ['Quote #', 'Received at', 'Customer Phone'], 'New Leads'),
             ...validateFileStructure(leadStatus, ['Quote #'], 'Lead Status'),
-            ...validateFileStructure(callLogs, ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result'], 'Call Log')
+            ...validateFileStructure(callLogs, callLogRequiredColumns, `Call Log (${callLogType})`)
           ];
           
           if (structureErrors.length > 0) {
@@ -467,7 +536,7 @@
           }
           
           // Process data
-          const processedResults = processData(newLeads, leadStatus, callLogs, workingHours);
+          const processedResults = processData(newLeads, leadStatus, callLogs, workingHours, callLogType);
           
           setResults(processedResults);
         } catch (error) {
@@ -558,7 +627,7 @@
       };
       
       // Main data processing function
-      const processData = (newLeads, leadStatus, callLogs, workingHours) => {
+      const processData = (newLeads, leadStatus, callLogs, workingHours, callLogType) => {
         // Phase 3: Silent row filtering with console logging
         
         // Step 1: Join new leads and lead status by Quote #
@@ -620,36 +689,51 @@
           console.log(`Phase 3: Skipped ${skippedInvalidDates} lead(s) with invalid Received at date`);
         }
         
-        // Step 3: Process call logs - filter Type=Voice and successful calls
+        // Step 3: Process call logs - filter based on provider type
         let skippedCallRows = 0;
         const validCalls = callLogs.filter(call => {
-          // Filter Type (existing logic, silent)
-          if (call.Type !== 'Voice') {
-            return false;
-          }
-          
-          // Filter Action Result (existing logic, silent)
-          if (call['Action Result'] !== 'Call connected' && call['Action Result'] !== 'Accepted') {
-            return false;
+          if (callLogType === 'ringcentral') {
+            // RingCentral: filter Type=Voice and successful results
+            if (call.Type !== 'Voice') {
+              return false;
+            }
+            if (call['Action Result'] !== 'Call connected' && call['Action Result'] !== 'Accepted') {
+              return false;
+            }
+          } else if (callLogType === 'dialpad') {
+            // Dialpad: filter by category
+            if (!['incoming', 'outgoing', 'callback_connected'].includes(call.category)) {
+              return false;
+            }
           }
           
           return true;
         }).map(call => {
-          const callTime = parseRingCentralDateTime(call.Date, call.Time);
-          const fromPhone = normalizePhone(call.From);
-          const toPhone = normalizePhone(call.To);
+          // Parse based on call log type
+          const parsed = parseCallLogRow(call, callLogType);
+          
+          if (!parsed) {
+            console.log('Failed to parse call row:', call);
+            skippedCallRows++;
+            return null;
+          }
           
           return {
-            ...call,
-            callTime,
-            fromPhone,
-            toPhone,
-            direction: call.Direction
+            ...parsed,
+            direction: parsed.direction // Normalized to "Incoming"/"Outgoing"
           };
         }).filter(call => {
+          if (!call) {
+            return false;
+          }
+          
           // Phase 3: Skip calls with invalid date/time
           if (!call.callTime) {
-            console.log('Skipping call with invalid date/time:', call.Date, call.Time);
+            console.log('Skipping call with invalid date/time:', 
+              callLogType === 'ringcentral' 
+                ? `${call.originalRow.Date} ${call.originalRow.Time}` 
+                : call.originalRow.date_connected
+            );
             skippedCallRows++;
             return false;
           }
@@ -679,7 +763,7 @@
           const receivedAt = parseExcelDate(lead['Received at']);
           
           if (!leadPhone) {
-            neverContacted.push(lead);
+            // neverContacted.push(lead);
             return;
           }
           
@@ -864,6 +948,7 @@
         setNewLeadsFile(null);
         setLeadStatusFile(null);
         setCallLogFile(null);
+        setCallLogType(null);
         setResults(null);
         setErrors([]);
       };
@@ -905,7 +990,7 @@
                 <div className="bg-white rounded-lg shadow-md p-6 mb-6">
                   <h2 className="text-xl font-semibold text-gray-800 mb-4">Upload Files</h2>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <FileUploader
                       label="New Leads (Excel)"
                       accept=".xlsx,.xls"
@@ -919,9 +1004,46 @@
                       file={leadStatusFile}
                       setFile={setLeadStatusFile}
                     />
-                    
+                  </div>
+                  
+                  {/* Call Log Provider Selection */}
+                  <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <label className="block text-sm font-semibold text-gray-700 mb-3">
+                      Call Log Provider <span className="text-red-500">*</span>
+                    </label>
+                    <div className="flex gap-6">
+                      <label className="flex items-center cursor-pointer">
+                        <input
+                          type="radio"
+                          name="callLogType"
+                          value="ringcentral"
+                          checked={callLogType === 'ringcentral'}
+                          onChange={(e) => setCallLogType(e.target.value)}
+                          className="w-4 h-4 text-blue-600 focus:ring-2 focus:ring-blue-500"
+                        />
+                        <span className="ml-2 text-gray-700">RingCentral</span>
+                      </label>
+                      
+                      <label className="flex items-center cursor-pointer">
+                        <input
+                          type="radio"
+                          name="callLogType"
+                          value="dialpad"
+                          checked={callLogType === 'dialpad'}
+                          onChange={(e) => setCallLogType(e.target.value)}
+                          className="w-4 h-4 text-blue-600 focus:ring-2 focus:ring-blue-500"
+                        />
+                        <span className="ml-2 text-gray-700">Dialpad</span>
+                      </label>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">
+                      ℹ️ Select your call log provider before uploading
+                    </p>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 gap-4">
                     <FileUploader
-                      label="RingCentral Calls (CSV)"
+                      label={callLogType ? `${callLogType === 'ringcentral' ? 'RingCentral' : 'Dialpad'} Calls (CSV)` : 'Call Logs (CSV) - Select provider first'}
                       accept=".csv"
                       file={callLogFile}
                       setFile={setCallLogFile}
