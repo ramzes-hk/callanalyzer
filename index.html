@@ -471,6 +471,7 @@
       const [userInfo, setUserInfo] = useState(() => {
         // Load user info from localStorage
         const saved = localStorage.getItem('userInfo');
+        console.log(saved);
         return saved ? JSON.parse(saved) : null;
       });
       
@@ -488,7 +489,7 @@
       }, [workingHours]);
       
       // Process files
-      const handleAnalyze = async (providedUserData = null) => {
+      const handleAnalyze = async () => {
         // Check if call log type is selected
         if (!callLogType) {
           setErrors(['Please select call log provider (RingCentral or Dialpad)']);
@@ -501,7 +502,8 @@
         }
         
         // Use provided data OR state
-        const currentUserInfo = providedUserData || userInfo;
+        const currentUserInfo = userInfo;
+        console.log(currentUserInfo);
         
         // Check if user info exists, if not show modal
         if (!currentUserInfo) {
@@ -992,14 +994,14 @@
                   
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <FileUploader
-                      label="New Leads (Excel)"
+                      label="Smart Moving - New Leads (Excel)"
                       accept=".xlsx,.xls"
                       file={newLeadsFile}
                       setFile={setNewLeadsFile}
                     />
                     
                     <FileUploader
-                      label="Lead Status (Excel)"
+                      label="Smart Moving - Lead Status (Excel)"
                       accept=".xlsx,.xls"
                       file={leadStatusFile}
                       setFile={setLeadStatusFile}
