@@ -134,6 +134,29 @@
     }
 
     /**
+     * Parse Nextiva timestamp into JavaScript Date
+     * Format: "2025-11-29 16:10:48"
+     */
+    function parseNextivaDateTime(timestamp) {
+      if (!timestamp) return null;
+      
+      try {
+        // Nextiva uses SQL-like timestamp format
+        const date = new Date(timestamp);
+        
+        if (isNaN(date.getTime())) {
+          console.warn('Invalid Nextiva timestamp:', timestamp);
+          return null;
+        }
+        
+        return date;
+      } catch (e) {
+        console.error('Error parsing Nextiva date:', e);
+        return null;
+      }
+    }
+
+    /**
      * Parse call log row based on provider type
      * Returns normalized call object
      */
@@ -158,6 +181,23 @@
           type: 'Voice', // Dialpad doesn't have type, assume Voice
           category: row['category'],
           name: row['name'],
+          originalRow: row
+        };
+      } else if (logType === 'nextiva') {
+        const direction = row['Dir.'] === 'IN' ? 'Incoming' : 'Outgoing';
+        const remoteParty = row['Remote Party'];
+        
+        return {
+          callTime: parseNextivaDateTime(row['Start Date']),
+          // Map single phone number based on direction
+          // Incoming: customer called us (Remote Party = From)
+          // Outgoing: we called customer (Remote Party = To)
+          fromPhone: direction === 'Incoming' ? normalizePhone(remoteParty) : null,
+          toPhone: direction === 'Outgoing' ? normalizePhone(remoteParty) : null,
+          direction: direction,
+          type: 'Voice', // Nextiva doesn't have type field
+          duration: parseInt(row['Duration (secs)']) || 0,
+          name: `${row['First Name'] || ''} ${row['Last Name'] || ''}`.trim(),
           originalRow: row
         };
       }
@@ -556,9 +596,14 @@
           const callLogs = await parseCSVFile(callLogFile);
           
           // Phase 2 Validation: Check structure and required columns (dynamic based on call log type)
-          const callLogRequiredColumns = callLogType === 'ringcentral'
-            ? ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result']
-            : ['direction', 'external_number', 'internal_number', 'date_connected', 'category'];
+          let callLogRequiredColumns;
+          if (callLogType === 'ringcentral') {
+            callLogRequiredColumns = ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result'];
+          } else if (callLogType === 'dialpad') {
+            callLogRequiredColumns = ['direction', 'external_number', 'internal_number', 'date_connected', 'category'];
+          } else if (callLogType === 'nextiva') {
+            callLogRequiredColumns = ['Start Date', 'Dir.', 'Remote Party', 'Duration (secs)'];
+          }
           
           const structureErrors = [
             ...validateFileStructure(newLeads, ['Quote #', 'Received at', 'Customer Phone'], 'New Leads'),
@@ -680,6 +725,9 @@
             skippedLeadRows++;
             return;
           }
+          if (!lead['Customer Phone']) {
+            return;
+          }
           if (!leadsMap.has(quoteNum)) {
             leadsMap.set(quoteNum, { ...lead });
           }
@@ -718,6 +766,10 @@
             skippedInvalidDates++;
             return false;
           }
+          if (lead['Status'].toLowerCase().includes("duplicate")) {
+            console.log("dupe");
+            return false;
+          }
           return isWithinWorkingHours(receivedAt, workingHours);
         });
         
@@ -740,6 +792,13 @@
           } else if (callLogType === 'dialpad') {
             // Dialpad: filter by category
             if (!['incoming', 'outgoing', 'callback_connected'].includes(call.category)) {
+              return false;
+            }
+          } else if (callLogType === 'nextiva') {
+            // Nextiva: filter by duration (only connected calls)
+            // Skip voicemail entries
+            const remoteParty = call['Remote Party'];
+            if (remoteParty && remoteParty.toLowerCase() === 'voicemail') {
               return false;
             }
           }
@@ -806,7 +865,7 @@
           
           // Find all calls matching this phone number after received time
           const matchingCalls = validCalls.filter(call => {
-            if (!call.callTime || call.callTime < receivedAt) return false;
+            //if (!call.callTime || call.callTime < receivedAt) return false;
             
             return (call.fromPhone === leadPhone || call.toPhone === leadPhone);
           }).sort((a, b) => a.callTime - b.callTime);
@@ -945,7 +1004,7 @@
           
           // Format response time
           if (newRow['Response Time'] !== undefined) {
-            newRow['Response Time'] = `${newRow['Response Time']} minutes`;
+            newRow['Response Time'] = `${newRow['Response Time']}`;
           }
           
           return newRow;
@@ -1072,6 +1131,18 @@
                         />
                         <span className="ml-2 text-gray-700">Dialpad</span>
                       </label>
+                      
+                      <label className="flex items-center cursor-pointer">
+                        <input
+                          type="radio"
+                          name="callLogType"
+                          value="nextiva"
+                          checked={callLogType === 'nextiva'}
+                          onChange={(e) => setCallLogType(e.target.value)}
+                          className="w-4 h-4 text-blue-600 focus:ring-2 focus:ring-blue-500"
+                        />
+                        <span className="ml-2 text-gray-700">Nextiva</span>
+                      </label>
                     </div>
                     <p className="text-xs text-gray-500 mt-2">
                       ℹ️ Select your call log provider before uploading
@@ -1080,7 +1151,12 @@
                   
                   <div className="grid grid-cols-1 gap-4">
                     <FileUploader
-                      label={callLogType ? `${callLogType === 'ringcentral' ? 'RingCentral' : 'Dialpad'} Calls (CSV)` : 'Call Logs (CSV) - Select provider first'}
+                      label={
+                        callLogType === 'ringcentral' ? 'RingCentral Calls (CSV)' :
+                        callLogType === 'dialpad' ? 'Dialpad Calls (CSV)' :
+                        callLogType === 'nextiva' ? 'Nextiva Calls (CSV)' :
+                        'Call Logs (CSV) - Select provider first'
+                      }
                       accept=".csv"
                       file={callLogFile}
                       setFile={setCallLogFile}
@@ -1583,18 +1659,18 @@
               <h3 className="text-lg font-semibold text-gray-800 mb-4">Summary</h3>
               <div className="grid grid-cols-4 gap-4">
                 <StatCard 
-                  title="Total Leads"
+                  title="Total Leads during work hours"
                   value={stats.total}
                   color="bg-blue-500"
                 />
                 <StatCard 
-                  title="Sales Called"
+                  title="Sales Called First"
                   value={stats.salesTeamCount}
                   subtitle={`${stats.salesTeamPercent}%`}
                   color="bg-green-500"
                 />
                 <StatCard 
-                  title="Customer Called"
+                  title="Customer Called First"
                   value={stats.customerCount}
                   subtitle={`${stats.customerPercent}%`}
                   color="bg-yellow-500"
