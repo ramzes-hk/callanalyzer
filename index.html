@@ -197,6 +197,7 @@
 
     /**
      * Check if a timestamp is within working hours
+     * Supports separate weekday and weekend schedules
      */
     function isWithinWorkingHours(timestamp, workingHours) {
       if (!timestamp || !workingHours) return true; // Default to include if no filter
@@ -207,12 +208,16 @@
       const minutes = date.getMinutes();
       const timeInMinutes = hours * 60 + minutes;
       
-      // Check if day is enabled
-      if (!workingHours.enabledDays[day]) return false;
+      // Determine if weekday (1-5) or weekend (0, 6)
+      const isWeekday = day >= 1 && day <= 5;
+      const schedule = isWeekday ? workingHours.weekday : workingHours.weekend;
+      
+      // Check if this day type is enabled
+      if (!schedule.enabled) return false;
       
       // Convert working hours to minutes
-      const [startHour, startMin] = workingHours.start.split(':').map(Number);
-      const [endHour, endMin] = workingHours.end.split(':').map(Number);
+      const [startHour, startMin] = schedule.start.split(':').map(Number);
+      const [endHour, endMin] = schedule.end.split(':').map(Number);
       const startMinutes = startHour * 60 + startMin;
       const endMinutes = endHour * 60 + endMin;
       
@@ -453,17 +458,48 @@
       const [workingHours, setWorkingHours] = useState(() => {
         // Load from localStorage or use defaults
         const saved = localStorage.getItem('workingHours');
-        return saved ? JSON.parse(saved) : {
-          start: '09:00',
-          end: '17:00',
-          enabledDays: {
-            0: false, // Sunday
-            1: true,  // Monday
-            2: true,  // Tuesday
-            3: true,  // Wednesday
-            4: true,  // Thursday
-            5: true,  // Friday
-            6: false  // Saturday
+        
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          
+          // Check if old format (has 'start' property at root level)
+          if (parsed.start) {
+            console.log('Migrating old working hours format to new format');
+            // Migrate old format to new weekday/weekend structure
+            const hasWeekdaysEnabled = Object.entries(parsed.enabledDays)
+              .filter(([day]) => day >= 1 && day <= 5)
+              .some(([, enabled]) => enabled);
+            const hasWeekendsEnabled = parsed.enabledDays[0] || parsed.enabledDays[6];
+            
+            return {
+              weekday: {
+                enabled: hasWeekdaysEnabled,
+                start: parsed.start,
+                end: parsed.end
+              },
+              weekend: {
+                enabled: hasWeekendsEnabled,
+                start: parsed.start,
+                end: parsed.end
+              }
+            };
+          }
+          
+          // Already new format
+          return parsed;
+        }
+        
+        // Default for new users: Both enabled with same hours (9AM-5PM)
+        return {
+          weekday: {
+            enabled: true,
+            start: '09:00',
+            end: '17:00'
+          },
+          weekend: {
+            enabled: true,
+            start: '09:00',
+            end: '17:00'
           }
         };
       });
@@ -502,8 +538,7 @@
         }
         
         // Use provided data OR state
-        const currentUserInfo = userInfo;
-        console.log(currentUserInfo);
+        const currentUserInfo = userInfo || localStorage.getItem('userInfo');
         
         // Check if user info exists, if not show modal
         if (!currentUserInfo) {
@@ -1348,17 +1383,45 @@
     
     function WorkingHoursConfig({ workingHours, setWorkingHours }) {
       const [expanded, setExpanded] = useState(false);
+      const [validationError, setValidationError] = useState('');
       
-      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      
-      const toggleDay = (dayIndex) => {
-        setWorkingHours({
-          ...workingHours,
-          enabledDays: {
-            ...workingHours.enabledDays,
-            [dayIndex]: !workingHours.enabledDays[dayIndex]
+      // Validate working hours when changed
+      const validateAndSetWorkingHours = (newHours) => {
+        setValidationError('');
+        
+        // Validate at least one day type is enabled
+        if (!newHours.weekday.enabled && !newHours.weekend.enabled) {
+          setValidationError('At least one day type (weekday or weekend) must be enabled');
+          return;
+        }
+        
+        // Validate weekday times if enabled
+        if (newHours.weekday.enabled) {
+          const [startH, startM] = newHours.weekday.start.split(':').map(Number);
+          const [endH, endM] = newHours.weekday.end.split(':').map(Number);
+          const startMin = startH * 60 + startM;
+          const endMin = endH * 60 + endM;
+          
+          if (startMin >= endMin) {
+            setValidationError('Weekday: Start time must be before end time');
+            return;
           }
-        });
+        }
+        
+        // Validate weekend times if enabled
+        if (newHours.weekend.enabled) {
+          const [startH, startM] = newHours.weekend.start.split(':').map(Number);
+          const [endH, endM] = newHours.weekend.end.split(':').map(Number);
+          const startMin = startH * 60 + startM;
+          const endMin = endH * 60 + endM;
+          
+          if (startMin >= endMin) {
+            setValidationError('Weekend: Start time must be before end time');
+            return;
+          }
+        }
+        
+        setWorkingHours(newHours);
       };
       
       return (
@@ -1373,50 +1436,124 @@
           
           {expanded && (
             <div className="mt-4 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Start Time
-                  </label>
-                  <input
-                    type="time"
-                    value={workingHours.start}
-                    onChange={(e) => setWorkingHours({ ...workingHours, start: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                  />
+              {/* Validation Error */}
+              {validationError && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                  <p className="text-red-700 text-sm">{validationError}</p>
+                </div>
+              )}
+              
+              <div className="grid grid-cols-2 gap-6">
+                {/* Weekdays Section */}
+                <div className="border border-gray-200 rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-md font-semibold text-gray-700">
+                      Weekdays
+                    </h3>
+                    <label className="flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={workingHours.weekday.enabled}
+                        onChange={(e) => validateAndSetWorkingHours({
+                          ...workingHours,
+                          weekday: { ...workingHours.weekday, enabled: e.target.checked }
+                        })}
+                        className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                      />
+                      <span className="ml-2 text-sm text-gray-600">Enabled</span>
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 mb-3">Monday - Friday</p>
+                  
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Start Time
+                      </label>
+                      <input
+                        type="time"
+                        value={workingHours.weekday.start}
+                        onChange={(e) => validateAndSetWorkingHours({
+                          ...workingHours,
+                          weekday: { ...workingHours.weekday, start: e.target.value }
+                        })}
+                        disabled={!workingHours.weekday.enabled}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md disabled:bg-gray-100 disabled:text-gray-400"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        End Time
+                      </label>
+                      <input
+                        type="time"
+                        value={workingHours.weekday.end}
+                        onChange={(e) => validateAndSetWorkingHours({
+                          ...workingHours,
+                          weekday: { ...workingHours.weekday, end: e.target.value }
+                        })}
+                        disabled={!workingHours.weekday.enabled}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md disabled:bg-gray-100 disabled:text-gray-400"
+                      />
+                    </div>
+                  </div>
                 </div>
                 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    End Time
-                  </label>
-                  <input
-                    type="time"
-                    value={workingHours.end}
-                    onChange={(e) => setWorkingHours({ ...workingHours, end: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                  />
-                </div>
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Working Days
-                </label>
-                <div className="flex gap-2">
-                  {days.map((day, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => toggleDay(idx)}
-                      className={`px-3 py-2 rounded-md font-medium transition ${
-                        workingHours.enabledDays[idx]
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-gray-200 text-gray-600'
-                      }`}
-                    >
-                      {day}
-                    </button>
-                  ))}
+                {/* Weekends Section */}
+                <div className="border border-gray-200 rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-md font-semibold text-gray-700">
+                      Weekends
+                    </h3>
+                    <label className="flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={workingHours.weekend.enabled}
+                        onChange={(e) => validateAndSetWorkingHours({
+                          ...workingHours,
+                          weekend: { ...workingHours.weekend, enabled: e.target.checked }
+                        })}
+                        className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                      />
+                      <span className="ml-2 text-sm text-gray-600">Enabled</span>
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 mb-3">Saturday - Sunday</p>
+                  
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Start Time
+                      </label>
+                      <input
+                        type="time"
+                        value={workingHours.weekend.start}
+                        onChange={(e) => validateAndSetWorkingHours({
+                          ...workingHours,
+                          weekend: { ...workingHours.weekend, start: e.target.value }
+                        })}
+                        disabled={!workingHours.weekend.enabled}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md disabled:bg-gray-100 disabled:text-gray-400"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        End Time
+                      </label>
+                      <input
+                        type="time"
+                        value={workingHours.weekend.end}
+                        onChange={(e) => validateAndSetWorkingHours({
+                          ...workingHours,
+                          weekend: { ...workingHours.weekend, end: e.target.value }
+                        })}
+                        disabled={!workingHours.weekend.enabled}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md disabled:bg-gray-100 disabled:text-gray-400"
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
