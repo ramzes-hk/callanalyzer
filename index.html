@@ -900,7 +900,7 @@
             salesTeamCalled.push({
               ...lead,
               'Contacted at': firstCall.callTime,
-              'Response Time': responseTime
+              'Respsone Time (minutes)': responseTime
             });
           } else {
             customerCalled.push({
@@ -928,7 +928,7 @@
         const total = allLeads.length;
         
         // Response times (only for sales team called)
-        const responseTimes = salesTeam.map(l => l['Response Time']).filter(t => t !== undefined);
+        const responseTimes = salesTeam.map(l => l['Respsone Time (minutes)']).filter(t => t !== undefined);
         
         const median = responseTimes.length > 0 
           ? calculatePercentile(responseTimes, 50)
@@ -978,7 +978,7 @@
           case 'sales':
             data = results.salesTeamCalled;
             columns = ['Quote #', 'Branch Name', 'Customer Name', 'Customer Phone', 
-                      'Received at', 'Contacted at', 'Response Time', 'Quote Sent', 
+                      'Received at', 'Contacted at', 'Respsone Time (minutes)', 
                       'Sales Person', 'Referral Source'];
             filename = `sales-team-contact-${new Date().toISOString().split('T')[0]}.csv`;
             break;
@@ -986,7 +986,7 @@
           case 'customer':
             data = results.customerCalled;
             columns = ['Quote #', 'Branch Name', 'Customer Name', 'Customer Phone',
-                      'Received at', 'Call received at', 'Quote Sent', 'Sales Person', 
+                      'Received at', 'Call received at', 'Sales Person', 
                       'Referral Source'];
             filename = `customer-contact-${new Date().toISOString().split('T')[0]}.csv`;
             break;
@@ -994,7 +994,7 @@
           case 'never':
             data = results.neverContacted;
             columns = ['Quote #', 'Branch Name', 'Customer Name', 'Customer Phone',
-                      'Received at', 'Quote Sent', 'Sales Person'];
+                      'Received at', 'Sales Person'];
             filename = `never-contacted-${new Date().toISOString().split('T')[0]}.csv`;
             break;
           
@@ -1021,8 +1021,8 @@
           }
           
           // Format response time
-          if (newRow['Response Time'] !== undefined) {
-            newRow['Response Time'] = `${newRow['Response Time']}`;
+          if (newRow['Respsone Time (minutes)'] !== undefined) {
+            newRow['Respsone Time (minutes)'] = `${newRow['Respsone Time (minutes)']}`;
           }
           
           return newRow;
