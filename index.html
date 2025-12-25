@@ -778,6 +778,23 @@
           console.log(`Phase 3: Skipped ${skippedInvalidDates} lead(s) with invalid Received at date`);
         }
         
+        // Calculate date range from business hours leads
+        let dateRange = { start: 'N/A', end: 'N/A' };
+        
+        if (businessHoursLeads.length > 0) {
+          const dates = businessHoursLeads
+            .map(lead => parseExcelDate(lead['Received at']))
+            .filter(date => date !== null)
+            .sort((a, b) => a - b);
+          
+          if (dates.length > 0) {
+            dateRange = {
+              start: dates[0].toLocaleDateString(),
+              end: dates[dates.length - 1].toLocaleDateString()
+            };
+          }
+        }
+        
         // Step 3: Process call logs - filter based on provider type
         let skippedCallRows = 0;
         const validCalls = callLogs.filter(call => {
@@ -901,7 +918,8 @@
           salesTeamCalled,
           customerCalled,
           neverContacted,
-          totalLeads: businessHoursLeads.length
+          totalLeads: businessHoursLeads.length,
+          dateRange
         };
       };
       
@@ -1647,11 +1665,11 @@
           <div ref={statsRef} className="bg-white rounded-lg shadow-md p-8 mb-6">
             {/* Header */}
             <div className="text-center mb-8">
-              <div className="inline-block border-2 border-gray-300 px-8 py-3 mb-3">
-                <span className="text-xl font-bold text-gray-600">COMPANY LOGO</span>
-              </div>
               <h2 className="text-2xl font-bold text-gray-800">Call Response Analysis</h2>
               <p className="text-gray-600">Generated on {new Date().toLocaleDateString()}</p>
+              <p className="text-gray-700 font-semibold mt-2">
+                Date Range: {results.dateRange.start} - {results.dateRange.end}
+              </p>
             </div>
             
             {/* Summary Cards */}
