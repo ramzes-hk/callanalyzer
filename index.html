@@ -596,21 +596,30 @@
           const callLogs = await parseCSVFile(callLogFile);
           
           // Phase 2 Validation: Check structure and required columns (dynamic based on call log type)
+          const reqColumns = {
+            ringcentral: ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result'],
+            dialpad: ['direction', 'external_number', 'internal_number', 'date_connected', 'category'],
+            nextiva: ['Start Date', 'Dir.', 'Remote Party', 'Duration (secs)'],
+          };
+          const callLogTypeToName = { ringcentral: "Ring Central", dialpad: "Dialpad", nextiva: "Nextiva"};
           let callLogRequiredColumns;
-          if (callLogType === 'ringcentral') {
-            callLogRequiredColumns = ['Type', 'Direction', 'From', 'To', 'Date', 'Time', 'Action Result'];
-          } else if (callLogType === 'dialpad') {
-            callLogRequiredColumns = ['direction', 'external_number', 'internal_number', 'date_connected', 'category'];
-          } else if (callLogType === 'nextiva') {
-            callLogRequiredColumns = ['Start Date', 'Dir.', 'Remote Party', 'Duration (secs)'];
-          }
-          
+          callLogRequiredColumns = reqColumns[callLogType];
+
           const structureErrors = [
             ...validateFileStructure(newLeads, ['Quote #', 'Received at', 'Customer Phone'], 'New Leads'),
             ...validateFileStructure(leadStatus, ['Quote #'], 'Lead Status'),
-            ...validateFileStructure(callLogs, callLogRequiredColumns, `Call Log (${callLogType})`)
           ];
           
+          const callLogErrors = validateFileStructure(callLogs, callLogRequiredColumns, `Call Log (${callLogType})`);
+          if (callLogErrors.length > 0) {
+            const diffLog = Object.entries(reqColumns).map(([key, req]) => [key, validateFileStructure(callLogs, req, `Call Log (${callLogType})`)]).
+            find(entry => entry[1].length === 0);
+            if (diffLog) {
+              structureErrors.push(`Submitted call log of type ${callLogTypeToName[diffLog[0]]} instead of ${callLogTypeToName[callLogType]}`);
+            } else {
+              structureErrors.push(...callLogErrors);
+            }
+          }
           if (structureErrors.length > 0) {
             setErrors(structureErrors);
             setProcessing(false);
