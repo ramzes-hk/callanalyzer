@@ -812,9 +812,6 @@
             if (call.Type !== 'Voice') {
               return false;
             }
-            if (call['Action Result'] !== 'Call connected' && call['Action Result'] !== 'Accepted') {
-              return false;
-            }
           } else if (callLogType === 'dialpad') {
             // Dialpad: filter by category
             if (!['incoming', 'outgoing', 'callback_connected'].includes(call.category)) {
